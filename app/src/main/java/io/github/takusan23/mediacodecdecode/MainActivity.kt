@@ -1,14 +1,14 @@
 package io.github.takusan23.mediacodecdecode
 
-import android.media.MediaCodec
-import android.media.MediaExtractor
-import android.media.MediaFormat
-import androidx.appcompat.app.AppCompatActivity
+import android.annotation.SuppressLint
+import android.media.*
 import android.os.Bundle
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
 import java.io.File
+
 
 /**
  * /sdcard/Android/data/io.github.takusan23.mediacodecdecode/files/video
@@ -21,6 +21,7 @@ class MainActivity : AppCompatActivity() {
 
     private val surfaceView by lazy { findViewById<SurfaceView>(R.id.surface_view) }
 
+    @SuppressLint("NewApi")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -50,7 +51,7 @@ class MainActivity : AppCompatActivity() {
         // MediaExtractorで動画ファイルを読み出す
         fun extractVideoFile(path: String) {
             // 動画の情報を読み出す
-            val (_mediaExtractor, index, format) = extractMedia(path, "video/") ?: return
+            val (_mediaExtractor, index, format) = extractMedia(path, "audio/") ?: return
             mediaExtractor = _mediaExtractor
             mediaFormat = format
             // トラックを選択
@@ -59,8 +60,29 @@ class MainActivity : AppCompatActivity() {
 
         extractVideoFile(videoItemIterator.next().path)
 
+        val bufSize = AudioTrack.getMinBufferSize(
+            mediaFormat!!.getInteger(MediaFormat.KEY_SAMPLE_RATE),
+            AudioFormat.CHANNEL_OUT_STEREO,
+            AudioFormat.ENCODING_PCM_16BIT)
+
+        val track = AudioTrack.Builder()
+            .setAudioAttributes(AudioAttributes.Builder().apply {
+                setUsage(AudioAttributes.USAGE_MEDIA)
+            }.build())
+            .setAudioFormat(AudioFormat.Builder().apply {
+                setSampleRate(mediaFormat!!.getInteger(MediaFormat.KEY_SAMPLE_RATE))
+                setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+            }.build())
+            .setBufferSizeInBytes(bufSize)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+
+        // 再生開始
+        track.play()
+
         // H.264なはず
-        val mediaCodec = MediaCodec.createDecoderByType("video/avc")
+        val mediaCodec = MediaCodec.createDecoderByType("audio/mp4a-latm")
         // 非同期モード
         mediaCodec.setCallback(object : MediaCodec.Callback() {
             override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
@@ -94,8 +116,15 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                // Surfaceへレンダリング
-                mediaCodec.releaseOutputBuffer(index, true)
+                // AudioTrackへ流す
+                val outputBuffer = mediaCodec.getOutputBuffer(index) ?: return
+
+                val outData = ByteArray(info.size)
+                outputBuffer.get(outData)
+                track.write(outData, 0, outData.size)
+
+                codec.releaseOutputBuffer(index, false)
+                // mediaCodec.releaseOutputBuffer(index, true)
             }
 
             override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
@@ -116,7 +145,7 @@ class MainActivity : AppCompatActivity() {
             override fun surfaceCreated(holder: SurfaceHolder) {
                 // MediaCodecの設定をする
                 val format = mediaFormat ?: return
-                mediaCodec.configure(format, holder.surface, null, 0)
+                mediaCodec.configure(format, /*holder.surface*/null, null, 0)
                 mediaCodec.start()
             }
 
