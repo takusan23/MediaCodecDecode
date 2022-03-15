@@ -20,23 +20,28 @@ import java.io.File
 class MainActivity : AppCompatActivity() {
 
     private val surfaceView by lazy { findViewById<SurfaceView>(R.id.surface_view) }
+    private val FOLDER_NAME = "split"
 
     @SuppressLint("NewApi")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        val videoFolder = File(getExternalFilesDir(null), "video").apply {
+        val videoFolder = File(getExternalFilesDir(null), FOLDER_NAME).apply {
             if (!exists()) {
                 mkdir()
             }
         }
 
+        // 数字を見つけ正規表現
+        val numberRegex = "(\\d+)".toRegex()
         // にある動画ファイルを配列にしてイテレータ
         // 連続再生いらない場合は一個だけ入れればいいと思います
         val videoItemIterator = videoFolder.listFiles()
             // ?.filter { it.extension == "ts" } // これ動画ファイル以外が入ってくる場合はここで見切りをつける
-            ?.toList()?.listIterator() ?: return
+            ?.toList()
+            ?.sortedBy { numberRegex.find(it.name)?.groupValues?.get(0)?.toIntOrNull() ?: 0 } // 数字の若い順にする
+            ?.listIterator() ?: return
 
         if (!videoItemIterator.hasNext()) {
             showMessage("ファイルがありません")
@@ -58,26 +63,29 @@ class MainActivity : AppCompatActivity() {
             mediaExtractor?.selectTrack(index)
         }
 
+        // 最初のファイルの情報をゲット
         extractVideoFile(videoItemIterator.next().path)
 
-        val bufSize = AudioTrack.getMinBufferSize(
-            mediaFormat!!.getInteger(MediaFormat.KEY_SAMPLE_RATE),
+        // サンプリングレート
+        val samplingRate = mediaFormat?.getInteger(MediaFormat.KEY_SAMPLE_RATE)!!
+        // 必須サイズを計算する
+        val bufferSize = AudioTrack.getMinBufferSize(
+            samplingRate,
             AudioFormat.CHANNEL_OUT_STEREO,
             AudioFormat.ENCODING_PCM_16BIT)
-
+        // 音声再生するやつ
         val track = AudioTrack.Builder()
             .setAudioAttributes(AudioAttributes.Builder().apply {
                 setUsage(AudioAttributes.USAGE_MEDIA)
             }.build())
             .setAudioFormat(AudioFormat.Builder().apply {
-                setSampleRate(mediaFormat!!.getInteger(MediaFormat.KEY_SAMPLE_RATE))
+                setSampleRate(samplingRate)
                 setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
             }.build())
-            .setBufferSizeInBytes(bufSize)
+            .setBufferSizeInBytes(bufferSize)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
-
         // 再生開始
         track.play()
 
