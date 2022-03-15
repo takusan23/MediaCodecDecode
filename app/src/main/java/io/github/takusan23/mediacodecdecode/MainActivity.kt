@@ -1,14 +1,15 @@
 package io.github.takusan23.mediacodecdecode
 
-import android.annotation.SuppressLint
-import android.media.*
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.os.Bundle
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import java.io.File
-
+import kotlin.concurrent.thread
 
 /**
  * /sdcard/Android/data/io.github.takusan23.mediacodecdecode/files/video
@@ -21,7 +22,6 @@ class MainActivity : AppCompatActivity() {
 
     private val surfaceView by lazy { findViewById<SurfaceView>(R.id.surface_view) }
 
-    @SuppressLint("NewApi")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -51,7 +51,7 @@ class MainActivity : AppCompatActivity() {
         // MediaExtractorで動画ファイルを読み出す
         fun extractVideoFile(path: String) {
             // 動画の情報を読み出す
-            val (_mediaExtractor, index, format) = extractMedia(path, "audio/") ?: return
+            val (_mediaExtractor, index, format) = extractMedia(path, "video/") ?: return
             mediaExtractor = _mediaExtractor
             mediaFormat = format
             // トラックを選択
@@ -60,103 +60,93 @@ class MainActivity : AppCompatActivity() {
 
         extractVideoFile(videoItemIterator.next().path)
 
-        val bufSize = AudioTrack.getMinBufferSize(
-            mediaFormat!!.getInteger(MediaFormat.KEY_SAMPLE_RATE),
-            AudioFormat.CHANNEL_OUT_STEREO,
-            AudioFormat.ENCODING_PCM_16BIT)
+        // スレッドを止めないと行けないので（メインスレッドを止めるわけには行かない）別スレッドで動かす
+        // これ非同期モードの意味なくね？
+        // スレッドと止めないと再生速度が早すぎるため
+        thread {
 
-        val track = AudioTrack.Builder()
-            .setAudioAttributes(AudioAttributes.Builder().apply {
-                setUsage(AudioAttributes.USAGE_MEDIA)
-            }.build())
-            .setAudioFormat(AudioFormat.Builder().apply {
-                setSampleRate(mediaFormat!!.getInteger(MediaFormat.KEY_SAMPLE_RATE))
-                setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-            }.build())
-            .setBufferSizeInBytes(bufSize)
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
-
-        // 再生開始
-        track.play()
-
-        // H.264なはず
-        val mediaCodec = MediaCodec.createDecoderByType("audio/mp4a-latm")
-        // 非同期モード
-        mediaCodec.setCallback(object : MediaCodec.Callback() {
-            override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
-                val inputBuffer = mediaCodec.getInputBuffer(index) ?: return
-                val size = mediaExtractor?.readSampleData(inputBuffer, 0) ?: return
-                if (size > 0) {
-                    // デコーダーへ流す
-                    mediaCodec.queueInputBuffer(index, 0, size, mediaExtractor!!.sampleTime, 0)
-                    mediaExtractor!!.advance()
-                } else {
-                    // 閉じる
-                    if (videoItemIterator.hasNext()) {
-                        // 次データへ
-                        val file = videoItemIterator.next()
-                        showMessage("MediaExtractor 次データへ ${file.name}")
-                        // 多分いる
-                        mediaCodec.queueInputBuffer(index, 0, 0, 0, 0)
-                        // 動画の情報を読み出す
-                        mediaExtractor!!.release()
-                        extractVideoFile(file.path)
+            val startMs = System.currentTimeMillis()
+            // H.264なはず
+            val mediaCodec = MediaCodec.createDecoderByType("video/avc")
+            // 非同期モード
+            mediaCodec.setCallback(object : MediaCodec.Callback() {
+                override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
+                    val inputBuffer = mediaCodec.getInputBuffer(index) ?: return
+                    val size = mediaExtractor?.readSampleData(inputBuffer, 0) ?: return
+                    if (size > 0) {
+                        // デコーダーへ流す
+                        mediaCodec.queueInputBuffer(index, 0, size, mediaExtractor!!.sampleTime, 0)
+                        mediaExtractor!!.advance()
                     } else {
-                        showMessage("MediaCodec リリース")
-                        // データなくなった際
-                        mediaCodec.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        // 開放
-                        mediaExtractor!!.release()
-                        mediaCodec.stop()
-                        mediaCodec.release()
+                        // 閉じる
+                        if (videoItemIterator.hasNext()) {
+                            // 次データへ
+                            val file = videoItemIterator.next()
+                            showMessage("MediaExtractor 次データへ ${file.name}")
+                            // 多分いる
+                            mediaCodec.queueInputBuffer(index, 0, 0, 0, 0)
+                            // 動画の情報を読み出す
+                            mediaExtractor!!.release()
+                            extractVideoFile(file.path)
+                        } else {
+                            showMessage("MediaCodec リリース")
+                            // データなくなった際
+                            mediaCodec.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            // 開放
+                            mediaExtractor!!.release()
+                            mediaCodec.stop()
+                            mediaCodec.release()
+                        }
                     }
                 }
-            }
 
-            override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                // AudioTrackへ流す
-                val outputBuffer = mediaCodec.getOutputBuffer(index) ?: return
+                override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+                    // Surfaceへレンダリング
+                    // だけど早すぎる、ので無理やり制御する
+                    // ありざいす！！！１
+                    // https://github.com/cedricfung/MediaCodecDemo/blob/master/src/io/vec/demo/mediacodec/DecodeActivity.java#L128
+                    while (info.presentationTimeUs / 1000 > System.currentTimeMillis() - startMs) {
+                        try {
+                            Thread.sleep(10)
+                        } catch (e: InterruptedException) {
+                            e.printStackTrace()
+                            break
+                        }
+                    }
+                    mediaCodec.releaseOutputBuffer(index, true)
+                }
 
-                val outData = ByteArray(info.size)
-                outputBuffer.get(outData)
-                track.write(outData, 0, outData.size)
+                override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
+                    e.printStackTrace()
+                    mediaCodec.stop()
+                    mediaCodec.release()
+                    mediaExtractor?.release()
+                    showMessage(e.message ?: "問題が発生しました")
+                }
 
-                codec.releaseOutputBuffer(index, false)
-                // mediaCodec.releaseOutputBuffer(index, true)
-            }
+                override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
+                    // フォーマットが変わった？
+                }
+            })
 
-            override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
-                e.printStackTrace()
-                mediaCodec.stop()
-                mediaCodec.release()
-                mediaExtractor?.release()
-                showMessage(e.message ?: "問題が発生しました")
-            }
+            // Surfaceが利用可能になったらMediaCodec起動
+            surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: SurfaceHolder) {
+                    // MediaCodecの設定をする
+                    val format = mediaFormat ?: return
+                    mediaCodec.configure(format, holder.surface, null, 0)
+                    mediaCodec.start()
+                }
 
-            override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
-                // フォーマットが変わった？
-            }
-        })
+                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
 
-        // Surfaceが利用可能になったらMediaCodec起動
-        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {
-                // MediaCodecの設定をする
-                val format = mediaFormat ?: return
-                mediaCodec.configure(format, /*holder.surface*/null, null, 0)
-                mediaCodec.start()
-            }
+                }
 
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                override fun surfaceDestroyed(holder: SurfaceHolder) {
 
-            }
-
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-
-            }
-        })
+                }
+            })
+        }
     }
 
     /**
