@@ -42,8 +42,15 @@ class MainActivity : AppCompatActivity() {
     /** MediaCodecでもらえるInputBufferのサイズを最大にする */
     private val INPUT_BUFFER_SIZE = 655360
 
-    /** デコードした生データと表示タイムスタンプ */
+    /**
+     * デコードした生データと表示タイムスタンプ
+     *
+     * 生データ、つまりPCM。AudioTrackで再生できるはず
+     * */
     private val decodedByteArrayList = arrayListOf<Pair<ByteArray, Long>>()
+
+    /** 動画ならtrue */
+    private val isVideo = false
 
     @SuppressLint("NewApi")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -106,6 +113,13 @@ class MainActivity : AppCompatActivity() {
                 setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
                 setLong(MediaFormat.KEY_DURATION, DURATION_SEC * 1000L * 1000L) // マイクロ秒
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, INPUT_BUFFER_SIZE)
+
+                if (isVideo) {
+                    setInteger(MediaFormat.KEY_CAPTURE_RATE, 1)
+                    setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10)
+                }
             }!!
 
             // MediaMuxer作成
@@ -113,6 +127,11 @@ class MainActivity : AppCompatActivity() {
             // 音声トラック追加
             val audioTrackIndex = mediaMuxer.addTrack(fixMediaFormat)
             mediaMuxer.start()
+
+            // サンプリングレート
+            val samplingRate = mediaFormat?.getInteger(MediaFormat.KEY_SAMPLE_RATE)!!
+            // 生データ再生するやつ
+            val audioTrack = createAudioTrack(samplingRate)
 
             // メタデータ格納用
             val bufferInfo = MediaCodec.BufferInfo()
@@ -193,6 +212,9 @@ class MainActivity : AppCompatActivity() {
 
             // どこまで生データをエンコードさせたか
             for ((byteArray, presentationTime) in decodedByteArrayList) {
+
+                audioTrack.write(byteArray, 0, byteArray.size)
+
                 // 生データ
                 // エンコーダー部分
                 val inputBufferId = encodeMediaCodec.dequeueInputBuffer(TIMEOUT_US)
@@ -225,6 +247,33 @@ class MainActivity : AppCompatActivity() {
             mediaMuxer.release()
         }
 
+    }
+
+    /** [AudioTrack]をつくる */
+    @SuppressLint("NewApi")
+    private fun createAudioTrack(samplingRate: Int): AudioTrack {
+        // 必須サイズを計算する
+        val bufferSize = AudioTrack.getMinBufferSize(
+            samplingRate,
+            AudioFormat.CHANNEL_OUT_STEREO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        // 音声再生するやつ
+        val audioTrack = AudioTrack.Builder()
+            .setAudioAttributes(AudioAttributes.Builder().apply {
+                setUsage(AudioAttributes.USAGE_MEDIA)
+            }.build())
+            .setAudioFormat(AudioFormat.Builder().apply {
+                setSampleRate(samplingRate)
+                setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+            }.build())
+            .setBufferSizeInBytes(bufferSize)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+        // 再生開始
+        audioTrack.play()
+        return audioTrack
     }
 
     /**
