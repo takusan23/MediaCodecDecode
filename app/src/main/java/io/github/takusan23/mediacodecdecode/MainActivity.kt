@@ -126,13 +126,13 @@ class MainActivity : AppCompatActivity() {
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
                 // AudioTrackへ流す
                 val outputBuffer = mediaCodec.getOutputBuffer(index) ?: return
-
                 val outData = ByteArray(info.size)
                 outputBuffer.get(outData)
                 track.write(outData, 0, outData.size)
-
+                // クリアしたほうがいいとかなんとか
+                outputBuffer.clear()
+                // 開放
                 codec.releaseOutputBuffer(index, false)
-                // mediaCodec.releaseOutputBuffer(index, true)
             }
 
             override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
@@ -148,23 +148,10 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        // Surfaceが利用可能になったらMediaCodec起動
-        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {
-                // MediaCodecの設定をする
-                val format = mediaFormat ?: return
-                mediaCodec.configure(format, /*holder.surface*/null, null, 0)
-                mediaCodec.start()
-            }
-
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-
-            }
-
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-
-            }
-        })
+        // MediaCodecの設定をする
+        val format = mediaFormat ?: return
+        mediaCodec.configure(format, /*holder.surface*/null, null, 0)
+        mediaCodec.start()
     }
 
     /**
