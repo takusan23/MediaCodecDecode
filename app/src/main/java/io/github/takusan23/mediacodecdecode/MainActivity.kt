@@ -109,6 +109,7 @@ class MainActivity : AppCompatActivity() {
             extractVideoFile(videoItemIterator.next().path)
 
             // エンコーダーへ渡すMediaFormat
+            println(mediaFormat)
             val fixMediaFormat = mediaFormat?.apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
                 setLong(MediaFormat.KEY_DURATION, DURATION_SEC * 1000L * 1000L) // マイクロ秒
@@ -130,6 +131,7 @@ class MainActivity : AppCompatActivity() {
 
             // サンプリングレート
             val samplingRate = mediaFormat?.getInteger(MediaFormat.KEY_SAMPLE_RATE)!!
+            println("サンプリングレート $samplingRate")
             // 生データ再生するやつ
             val audioTrack = createAudioTrack(samplingRate)
 
@@ -148,9 +150,6 @@ class MainActivity : AppCompatActivity() {
                 start()
             }
 
-            // 経過時間計測用
-            var prevPresentationTime = 0L
-            var prevBufferInfo: MediaCodec.BufferInfo? = null
             while (true) {
 
                 // デコーダー部分
@@ -164,8 +163,6 @@ class MainActivity : AppCompatActivity() {
                         decodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, mediaExtractor!!.sampleTime, 0)
                         mediaExtractor!!.advance()
                     } else {
-                        // 経過時間を足す
-                        prevPresentationTime = prevBufferInfo?.presentationTimeUs ?: 0
                         // データがないので次データへ
                         if (videoItemIterator.hasNext()) {
                             // 次データへ
@@ -196,8 +193,7 @@ class MainActivity : AppCompatActivity() {
                     // 生データをメモリに保持（OOM不可避）
                     val chunk = ByteArray(bufferInfo.size)
                     outputBuffer[chunk]
-                    decodedByteArrayList.add(chunk to prevPresentationTime + bufferInfo.presentationTimeUs)
-                    prevBufferInfo = bufferInfo
+                    decodedByteArrayList.add(chunk to 0)
                     // 消したほうがいいらしい
                     outputBuffer.clear()
                     // 返却
@@ -210,10 +206,13 @@ class MainActivity : AppCompatActivity() {
             decodeMediaCodec.stop()
             decodeMediaCodec.release()
 
+            // 経過時間計測用
+            var totalBytesRead = 0L
+            var mPresentationTime = 0L
             // どこまで生データをエンコードさせたか
             for ((byteArray, presentationTime) in decodedByteArrayList) {
 
-                audioTrack.write(byteArray, 0, byteArray.size)
+                // audioTrack.write(byteArray, 0, byteArray.size)
 
                 // 生データ
                 // エンコーダー部分
@@ -223,7 +222,9 @@ class MainActivity : AppCompatActivity() {
                     val inputBuffer = encodeMediaCodec.getInputBuffer(inputBufferId)!!
                     inputBuffer[byteArray]
                     // エンコーダーへ渡す
-                    encodeMediaCodec.queueInputBuffer(inputBufferId, 0, byteArray.size, presentationTime, 0)
+                    encodeMediaCodec.queueInputBuffer(inputBufferId, 0, byteArray.size, mPresentationTime, 0)
+                    totalBytesRead += byteArray.size
+                    mPresentationTime = 1000000L * (totalBytesRead / 2) / samplingRate
                 }
 
                 // エンコーダーから圧縮したデータを受け取る
@@ -245,6 +246,8 @@ class MainActivity : AppCompatActivity() {
             // MediaMuxerも終了
             mediaMuxer.stop()
             mediaMuxer.release()
+            // 再生するやつも終了
+            audioTrack.release()
         }
 
     }
