@@ -173,6 +173,13 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            // エンコーダー、デコーダーの種類を出す
+            val message = """
+                エンコーダー：${encodeMediaCodec.name}
+                デコーダー：${decodeMediaCodec.name}
+            """.trimIndent()
+            showMessage(message)
+
             /**
              *  --- 複数ファイルを全てデコードして生データにする（PCM） ---
              * */
