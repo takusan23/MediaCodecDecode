@@ -30,14 +30,11 @@ class MainActivity : AppCompatActivity() {
     /** デコードするMIME_TYPE */
     private val DECODE_MIME_TYPE = "audio/mp4a-latm"
 
-    /** 音楽時間 */
-    private val DURATION_SEC = 121 // 2分1秒
-
     /** タイムアウト */
     private val TIMEOUT_US = 10000L
 
     /** ビットレート */
-    private val BIT_RATE = 250000
+    private val BIT_RATE = 128 * 1024
 
     /** MediaCodecでもらえるInputBufferのサイズを最大にする */
     private val INPUT_BUFFER_SIZE = 655360
@@ -57,6 +54,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // 複数ある音声ファイルの保存先
         val videoFolder = File(getExternalFilesDir(null), FOLDER_NAME).apply {
             if (!exists()) {
                 mkdir()
@@ -70,6 +68,17 @@ class MainActivity : AppCompatActivity() {
             }
             createNewFile()
         }
+
+        // 音声だけの生データ
+        val rawAudioFile = File(getExternalFilesDir(null), "raw_audio").apply {
+            if (!exists()) {
+                delete()
+            }
+            createNewFile()
+        }
+
+        // 書き込むやつ
+        val bufferedInputStream = rawAudioFile.outputStream().buffered()
 
         // 数字を見つける正規表現
         val numberRegex = "(\\d+)".toRegex()
@@ -112,8 +121,8 @@ class MainActivity : AppCompatActivity() {
             println(mediaFormat)
             val fixMediaFormat = mediaFormat?.apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
-                setLong(MediaFormat.KEY_DURATION, DURATION_SEC * 1000L * 1000L) // マイクロ秒
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, INPUT_BUFFER_SIZE)
+                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
 
                 if (isVideo) {
                     setInteger(MediaFormat.KEY_CAPTURE_RATE, 1)
@@ -131,7 +140,6 @@ class MainActivity : AppCompatActivity() {
 
             // サンプリングレート
             val samplingRate = mediaFormat?.getInteger(MediaFormat.KEY_SAMPLE_RATE)!!
-            println("サンプリングレート $samplingRate")
             // 生データ再生するやつ
             val audioTrack = createAudioTrack(samplingRate)
 
@@ -145,11 +153,29 @@ class MainActivity : AppCompatActivity() {
                 start()
             }
             // エンコード用（生データ -> aac）MediaCodec
-            val encodeMediaCodec = MediaCodec.createEncoderByType(DECODE_MIME_TYPE).apply {
-                configure(fixMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                start()
+            val encodeMediaCodec = try {
+                MediaCodec.createEncoderByType(DECODE_MIME_TYPE).apply {
+                    configure(fixMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    start()
+                }
+            } catch (e: Exception) {
+                // エミュレーターのときは上で例外がスローｗｗｗするのでこっちを使う
+                MediaCodec.createEncoderByType(DECODE_MIME_TYPE).apply {
+                    val format = MediaFormat().apply {
+                        setString(MediaFormat.KEY_MIME, DECODE_MIME_TYPE)
+                        setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
+                        setInteger(MediaFormat.KEY_CHANNEL_COUNT, 2)
+                        setInteger(MediaFormat.KEY_SAMPLE_RATE, 44100)
+                        setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                    }
+                    configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    start()
+                }
             }
 
+            /**
+             *  --- 複数ファイルを全てデコードして生データにする（PCM） ---
+             * */
             while (true) {
 
                 // デコーダー部分
@@ -174,7 +200,6 @@ class MainActivity : AppCompatActivity() {
                             mediaExtractor!!.release()
                             extractVideoFile(file.path)
                         } else {
-                            showMessage("MediaCodec リリース")
                             // データなくなった場合は終了フラグを立てる
                             decodeMediaCodec.queueInputBuffer(inputBufferId, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                             // 開放
@@ -193,41 +218,52 @@ class MainActivity : AppCompatActivity() {
                     // 生データをメモリに保持（OOM不可避）
                     val chunk = ByteArray(bufferInfo.size)
                     outputBuffer[chunk]
-                    decodedByteArrayList.add(chunk to 0)
+                    bufferedInputStream.write(chunk)
+                    // decodedByteArrayList.add(chunk to 0)
                     // 消したほうがいいらしい
                     outputBuffer.clear()
                     // 返却
                     decodeMediaCodec.releaseOutputBuffer(outputBufferId, false)
                 }
-
             }
 
             // デコーダー終了
             decodeMediaCodec.stop()
             decodeMediaCodec.release()
+            bufferedInputStream.close()
+            showMessage("デコード完了")
 
-            // 経過時間計測用
-            var totalBytesRead = 0L
+            /**
+             *  --- 生データをAACでエンコードする ---
+             * */
+            val rawDataInputStream = rawAudioFile.inputStream().buffered()
+            // 読み出し済みの位置と時間
+            var totalBytesRead = 0
             var mPresentationTime = 0L
-            // どこまで生データをエンコードさせたか
-            for ((byteArray, presentationTime) in decodedByteArrayList) {
-
-                // audioTrack.write(byteArray, 0, byteArray.size)
-
-                // 生データ
-                // エンコーダー部分
+            // 生データからエンコード
+            while (true) {
                 val inputBufferId = encodeMediaCodec.dequeueInputBuffer(TIMEOUT_US)
                 if (inputBufferId >= 0) {
                     // デコードした生データをエンコーダーへ渡す
                     val inputBuffer = encodeMediaCodec.getInputBuffer(inputBufferId)!!
-                    inputBuffer[byteArray]
+                    val buffer = ByteArray(inputBuffer.capacity())
+                    val size = rawDataInputStream.read(buffer)
                     // エンコーダーへ渡す
-                    encodeMediaCodec.queueInputBuffer(inputBufferId, 0, byteArray.size, mPresentationTime, 0)
-                    totalBytesRead += byteArray.size
-                    mPresentationTime = 1000000L * (totalBytesRead / 2) / samplingRate
+                    if (size > 0) {
+                        // 書き込む。書き込んだデータは[onOutputBufferAvailable]で受け取れる
+                        inputBuffer.put(buffer, 0, size)
+                        encodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, mPresentationTime, 0)
+                        // ここはAOSPパクった。経過時間を計算してる
+                        totalBytesRead += size
+                        // これ totalBytesRead / 4 であっってんの？
+                        // 何故か時間が2倍してある,,,は？
+                        mPresentationTime = 1000000L * (totalBytesRead / 4) / 44100
+                    } else {
+                        encodeMediaCodec.queueInputBuffer(inputBufferId, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        break
+                    }
                 }
-
-                // エンコーダーから圧縮したデータを受け取る
+                // デコーダーから生データを受け取る
                 val outputBufferId = encodeMediaCodec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
                 if (outputBufferId >= 0) {
                     // デコード結果をもらう
@@ -239,18 +275,20 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            showMessage("エンコード終了")
             // エンコーダー終了
             encodeMediaCodec.stop()
             encodeMediaCodec.release()
+
             // MediaMuxerも終了
             mediaMuxer.stop()
             mediaMuxer.release()
             // 再生するやつも終了
             audioTrack.release()
+            rawDataInputStream.close()
+            showMessage("エンコード終了")
         }
-
     }
+
 
     /** [AudioTrack]をつくる */
     @SuppressLint("NewApi")
