@@ -222,7 +222,7 @@ class MainActivity : AppCompatActivity() {
                 if (outputBufferId >= 0) {
                     // デコード結果をもらう
                     val outputBuffer = decodeMediaCodec.getOutputBuffer(outputBufferId)!!
-                    // 生データをメモリに保持（OOM不可避）
+                    // 生データを一時的に保存する
                     val chunk = ByteArray(bufferInfo.size)
                     outputBuffer[chunk]
                     bufferedInputStream.write(chunk)
