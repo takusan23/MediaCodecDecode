@@ -45,9 +45,6 @@ class MainActivity : AppCompatActivity() {
     /** MediaCodecでもらえるInputBufferのサイズ */
     private val INPUT_BUFFER_SIZE = 655360
 
-    /** 動画ならtrue */
-    private val isVideo = true
-
     @SuppressLint("NewApi")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -107,18 +104,18 @@ class MainActivity : AppCompatActivity() {
 
             // エンコーダーへ渡すMediaFormat
             println(mediaFormat)
-            val fixMediaFormat = mediaFormat?.apply {
-                setString(MediaFormat.KEY_MIME, DECODE_MIME_TYPE)
-                setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
+            val height = mediaFormat?.getInteger(MediaFormat.KEY_HEIGHT) ?: 720
+            val width = mediaFormat?.getInteger(MediaFormat.KEY_WIDTH) ?: 1280
+            // データを取り出してMediaFormatを作る。なぜかコピーしたのを突っ込んだらコケた
+            // TODO エミュレータだとコピーしてパラメータを足してエンコーダーに突っ込むとコケるかも
+            val fixMediaFormat = /*MediaFormat.createVideoFormat(DECODE_MIME_TYPE, width, height)*/mediaFormat?.apply {
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, INPUT_BUFFER_SIZE)
-                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-
-                if (isVideo) {
-                    setInteger(MediaFormat.KEY_CAPTURE_RATE, 1)
-                    setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
-                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10)
-                }
+                // setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                setString(MediaFormat.KEY_MIME, DECODE_MIME_TYPE)
+                setInteger(MediaFormat.KEY_BIT_RATE, /*BIT_RATE*/1920 * 1080)
+                setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10)
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             }!!
 
             // MediaMuxer作成
@@ -131,28 +128,15 @@ class MainActivity : AppCompatActivity() {
             val encoderBufferInfo = MediaCodec.BufferInfo()
 
             // エンコード用（生データ -> H.264）MediaCodec
-            val encodeMediaCodec = try {
-                MediaCodec.createEncoderByType(DECODE_MIME_TYPE).apply {
-                    configure(fixMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                }
-            } catch (e: Exception) {
-                // エミュレーターのときは上で例外がスローｗｗｗするのでこっちを使う
-                MediaCodec.createEncoderByType(DECODE_MIME_TYPE).apply {
-                    val format = MediaFormat().apply {
-                        setString(MediaFormat.KEY_MIME, DECODE_MIME_TYPE)
-                        setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
-                        setInteger(MediaFormat.KEY_CHANNEL_COUNT, 2)
-                        setInteger(MediaFormat.KEY_SAMPLE_RATE, 44100)
-                        setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                    }
-                    configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                }
-            }.apply { start() }
+            val encodeMediaCodec = MediaCodec.createEncoderByType(DECODE_MIME_TYPE).apply {
+                configure(fixMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                start()
+            }
 
             // H.264なはず
             // デコード用（H.264 -> 生データ）MediaCodec
             val decodeMediaCodec = MediaCodec.createDecoderByType(DECODE_MIME_TYPE).apply {
-                configure(mediaFormat, null, null, 0)
+                configure(fixMediaFormat, null, null, 0)
                 start()
             }
 
@@ -208,28 +192,43 @@ class MainActivity : AppCompatActivity() {
                     val outputBufferId = decodeMediaCodec.dequeueOutputBuffer(encoderBufferInfo, TIMEOUT_US)
                     // ネストがやばくなってきた,,,
                     if (outputBufferId >= 0) {
-
                         // デコード結果をもらう
-                        val outputBuffer = decodeMediaCodec.getOutputBuffer(outputBufferId)!!
-                        // 生データを一時的に保存する
-                        // val chunk = ByteArray(encoderBufferInfo.size)
-                        // outputBuffer[chunk]
+                        // こいつをエンコーダーに投げる
+                        val chunk = decodeMediaCodec.getOutputBuffer(outputBufferId)!!.let { outputBuffer ->
+                            val chunk = ByteArray(outputBuffer.capacity())
+                            outputBuffer[chunk]
+                            // 消したほうがいいらしい
+                            outputBuffer.clear()
+                            // ByteArrayを返す
+                            chunk
+                        }
+                        // エンコーダーへ書き込む前にリリースする
+                        decodeMediaCodec.releaseOutputBuffer(outputBufferId, false)
 
                         /**
                          *  --- デコードした生データをエンコーダーに入れる ---
                          * */
-                        val encoderBufferInfo = MediaCodec.BufferInfo()
+                        var readByteSize = 0
+                        // 分割する
                         while (true) {
                             val inputBufferId = encodeMediaCodec.dequeueInputBuffer(TIMEOUT_US)
                             if (inputBufferId >= 0) {
-                                val size = encoderBufferInfo.size
                                 // デコードした生データをエンコーダーへ渡す
                                 val inputBuffer = encodeMediaCodec.getInputBuffer(inputBufferId)!!
-                                // 書き込む。書き込んだデータは[onOutputBufferAvailable]で受け取れる
-                                val writeBuffer = ByteArray(inputBuffer.capacity())
-                                outputBuffer[writeBuffer]
-                                inputBuffer.put(writeBuffer, 0, size)
-                                encodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, presentationTime, 0)
+                                val writeByteArray = ByteArray(inputBuffer.capacity())
+                                val size = writeByteArray.size
+                                // データが有る限り読み出す
+                                if (readByteSize < chunk.size) {
+                                    inputBuffer.put(chunk, readByteSize, size)
+                                    readByteSize += size
+                                    // 書き込む。書き込んだデータは[onOutputBufferAvailable]で受け取れる
+                                    inputBuffer.put(writeByteArray, 0, size)
+                                    encodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, presentationTime, 0)
+                                } else {
+                                    // 終了フラグを立てる
+                                    encodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                    break
+                                }
                                 // 時間を足す
                                 presentationTime += abs(presentationTime - encoderBufferInfo.presentationTimeUs)
                             }
@@ -244,8 +243,6 @@ class MainActivity : AppCompatActivity() {
                                 encodeMediaCodec.releaseOutputBuffer(outputBufferId, false)
                             }
                         }
-
-
                     }
                 }
 
