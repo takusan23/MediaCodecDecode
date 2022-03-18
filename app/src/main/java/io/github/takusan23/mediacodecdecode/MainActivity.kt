@@ -3,10 +3,14 @@ package io.github.takusan23.mediacodecdecode
 import android.annotation.SuppressLint
 import android.media.*
 import android.os.Bundle
+import android.view.Surface
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import java.io.File
 import kotlin.concurrent.thread
+import kotlin.math.abs
 
 
 /**
@@ -18,36 +22,31 @@ import kotlin.concurrent.thread
  * */
 class MainActivity : AppCompatActivity() {
 
+    private val surfaceView by lazy { findViewById<SurfaceView>(R.id.surface_view) }
+
     /** 動画ファイルがあるフォルダ名 */
     private val FOLDER_NAME = "split"
 
     /** ファイル名 */
-    private val MERGE_FILE_NAME = "merged.aac"
+    private val MERGE_FILE_NAME = "merged.mp4"
 
     /** MIME_TYPE */
-    private val MIME_TYPE = "audio/"
+    private val MIME_TYPE = "video/"
 
     /** デコードするMIME_TYPE */
-    private val DECODE_MIME_TYPE = "audio/mp4a-latm"
+    private val DECODE_MIME_TYPE = "video/avc" // MediaFormat.MIMETYPE_VIDEO_AVC
 
     /** タイムアウト */
     private val TIMEOUT_US = 10000L
 
     /** ビットレート */
-    private val BIT_RATE = 128 * 1024
+    private val BIT_RATE = 1000 * 1024
 
-    /** MediaCodecでもらえるInputBufferのサイズを最大にする */
+    /** MediaCodecでもらえるInputBufferのサイズ */
     private val INPUT_BUFFER_SIZE = 655360
 
-    /**
-     * デコードした生データと表示タイムスタンプ
-     *
-     * 生データ、つまりPCM。AudioTrackで再生できるはず
-     * */
-    private val decodedByteArrayList = arrayListOf<Pair<ByteArray, Long>>()
-
     /** 動画ならtrue */
-    private val isVideo = false
+    private val isVideo = true
 
     @SuppressLint("NewApi")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -68,17 +67,6 @@ class MainActivity : AppCompatActivity() {
             }
             createNewFile()
         }
-
-        // 音声だけの生データ
-        val rawAudioFile = File(getExternalFilesDir(null), "raw_audio").apply {
-            if (!exists()) {
-                delete()
-            }
-            createNewFile()
-        }
-
-        // 書き込むやつ
-        val bufferedInputStream = rawAudioFile.outputStream().buffered()
 
         // 数字を見つける正規表現
         val numberRegex = "(\\d+)".toRegex()
@@ -120,6 +108,7 @@ class MainActivity : AppCompatActivity() {
             // エンコーダーへ渡すMediaFormat
             println(mediaFormat)
             val fixMediaFormat = mediaFormat?.apply {
+                setString(MediaFormat.KEY_MIME, DECODE_MIME_TYPE)
                 setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, INPUT_BUFFER_SIZE)
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
@@ -134,29 +123,17 @@ class MainActivity : AppCompatActivity() {
 
             // MediaMuxer作成
             val mediaMuxer = MediaMuxer(mergedFile.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            // 音声トラック追加
-            val audioTrackIndex = mediaMuxer.addTrack(fixMediaFormat)
+            // 映像トラック追加
+            val videoTrackIndex = mediaMuxer.addTrack(fixMediaFormat)
             mediaMuxer.start()
 
-            // サンプリングレート
-            val samplingRate = mediaFormat?.getInteger(MediaFormat.KEY_SAMPLE_RATE)!!
-            // 生データ再生するやつ
-            val audioTrack = createAudioTrack(samplingRate)
-
             // メタデータ格納用
-            val bufferInfo = MediaCodec.BufferInfo()
+            val encoderBufferInfo = MediaCodec.BufferInfo()
 
-            // H.264なはず
-            // デコード用（aac -> 生データ）MediaCodec
-            val decodeMediaCodec = MediaCodec.createDecoderByType(DECODE_MIME_TYPE).apply {
-                configure(mediaFormat, null, null, 0)
-                start()
-            }
-            // エンコード用（生データ -> aac）MediaCodec
+            // エンコード用（生データ -> H.264）MediaCodec
             val encodeMediaCodec = try {
                 MediaCodec.createEncoderByType(DECODE_MIME_TYPE).apply {
                     configure(fixMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                    start()
                 }
             } catch (e: Exception) {
                 // エミュレーターのときは上で例外がスローｗｗｗするのでこっちを使う
@@ -169,133 +146,142 @@ class MainActivity : AppCompatActivity() {
                         setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
                     }
                     configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                    start()
                 }
+            }.apply { start() }
+
+            // H.264なはず
+            // デコード用（H.264 -> 生データ）MediaCodec
+            val decodeMediaCodec = MediaCodec.createDecoderByType(DECODE_MIME_TYPE).apply {
+                configure(mediaFormat, null, null, 0)
+                start()
             }
+
 
             // エンコーダー、デコーダーの種類を出す
             val message = """
-                エンコーダー：${encodeMediaCodec.name}
-                デコーダー：${decodeMediaCodec.name}
-            """.trimIndent()
+                 エンコーダー：${encodeMediaCodec.name}
+                 デコーダー：${decodeMediaCodec.name}
+             """.trimIndent()
             showMessage(message)
 
-            /**
-             *  --- 複数ファイルを全てデコードして生データにする（PCM） ---
-             * */
-            while (true) {
-
-                // デコーダー部分
-                val inputBufferId = decodeMediaCodec.dequeueInputBuffer(TIMEOUT_US)
-                if (inputBufferId >= 0) {
-                    // Extractorからデータを読みだす
-                    val inputBuffer = decodeMediaCodec.getInputBuffer(inputBufferId)!!
-                    val size = mediaExtractor!!.readSampleData(inputBuffer, 0)
-                    if (size > 0) {
-                        // デコーダーへ流す
-                        decodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, mediaExtractor!!.sampleTime, 0)
-                        mediaExtractor!!.advance()
-                    } else {
-                        // データがないので次データへ
-                        if (videoItemIterator.hasNext()) {
-                            // 次データへ
-                            val file = videoItemIterator.next()
-                            showMessage("MediaExtractor 次データへ ${file.name}")
-                            // 多分いる
-                            decodeMediaCodec.queueInputBuffer(inputBufferId, 0, 0, 0, 0)
-                            // 動画の情報を読み出す
-                            mediaExtractor!!.release()
-                            extractVideoFile(file.path)
-                        } else {
-                            // データなくなった場合は終了フラグを立てる
-                            decodeMediaCodec.queueInputBuffer(inputBufferId, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            // 開放
-                            mediaExtractor!!.release()
-                            // 終了
-                            break
-                        }
-                    }
-                }
-
-                // デコーダーから生データを受け取る
-                val outputBufferId = decodeMediaCodec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (outputBufferId >= 0) {
-                    // デコード結果をもらう
-                    val outputBuffer = decodeMediaCodec.getOutputBuffer(outputBufferId)!!
-                    // 生データを一時的に保存する
-                    val chunk = ByteArray(bufferInfo.size)
-                    outputBuffer[chunk]
-                    bufferedInputStream.write(chunk)
-                    // decodedByteArrayList.add(chunk to 0)
-                    // 消したほうがいいらしい
-                    outputBuffer.clear()
-                    // 返却
-                    decodeMediaCodec.releaseOutputBuffer(outputBufferId, false)
-                }
-            }
-
-            // デコーダー終了
-            decodeMediaCodec.stop()
-            decodeMediaCodec.release()
-            bufferedInputStream.close()
-            showMessage("デコード完了")
-
-            /**
-             *  --- 生データをAACでエンコードする ---
-             * */
-            val rawDataInputStream = rawAudioFile.inputStream().buffered()
             // 読み出し済みの位置と時間
             var totalBytesRead = 0
-            var mPresentationTime = 0L
-            // 生データからエンコード
-            while (true) {
-                val inputBufferId = encodeMediaCodec.dequeueInputBuffer(TIMEOUT_US)
-                if (inputBufferId >= 0) {
-                    // デコードした生データをエンコーダーへ渡す
-                    val inputBuffer = encodeMediaCodec.getInputBuffer(inputBufferId)!!
-                    val buffer = ByteArray(inputBuffer.capacity())
-                    val size = rawDataInputStream.read(buffer)
-                    // エンコーダーへ渡す
-                    if (size > 0) {
-                        // 書き込む。書き込んだデータは[onOutputBufferAvailable]で受け取れる
-                        inputBuffer.put(buffer, 0, size)
-                        encodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, mPresentationTime, 0)
-                        // ここはAOSPパクった。経過時間を計算してる
-                        totalBytesRead += size
-                        // これ totalBytesRead / 4 であっってんの？
-                        // 何故か時間が2倍してある,,,は？
-                        mPresentationTime = 1000000L * (totalBytesRead / 4) / 44100
-                    } else {
-                        encodeMediaCodec.queueInputBuffer(inputBufferId, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        break
+            var presentationTime = 0L
+
+            /**
+             *  --- 複数ファイルを全てデコードする ---
+             * */
+            thread {
+                while (true) {
+                    // デコーダー部分
+                    val inputBufferId = decodeMediaCodec.dequeueInputBuffer(TIMEOUT_US)
+                    if (inputBufferId >= 0) {
+                        // Extractorからデータを読みだす
+                        val inputBuffer = decodeMediaCodec.getInputBuffer(inputBufferId)!!
+                        val size = mediaExtractor!!.readSampleData(inputBuffer, 0)
+                        if (size > 0) {
+                            // デコーダーへ流す
+                            decodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, mediaExtractor!!.sampleTime, 0)
+                            mediaExtractor!!.advance()
+                        } else {
+                            // データがないので次データへ
+                            if (videoItemIterator.hasNext()) {
+                                // 次データへ
+                                val file = videoItemIterator.next()
+                                showMessage("MediaExtractor 次データへ ${file.name}")
+                                // 多分いる
+                                decodeMediaCodec.queueInputBuffer(inputBufferId, 0, 0, 0, 0)
+                                // 動画の情報を読み出す
+                                mediaExtractor!!.release()
+                                extractVideoFile(file.path)
+                            } else {
+                                // データなくなった場合は終了フラグを立てる
+                                decodeMediaCodec.queueInputBuffer(inputBufferId, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                                // 開放
+                                mediaExtractor!!.release()
+                                // 終了
+                                break
+                            }
+                        }
+                    }
+                    // デコードした内容をエンコーダーへ移す
+                    val outputBufferId = decodeMediaCodec.dequeueOutputBuffer(encoderBufferInfo, TIMEOUT_US)
+                    // ネストがやばくなってきた,,,
+                    if (outputBufferId >= 0) {
+
+                        // デコード結果をもらう
+                        val outputBuffer = decodeMediaCodec.getOutputBuffer(outputBufferId)!!
+                        // 生データを一時的に保存する
+                        // val chunk = ByteArray(encoderBufferInfo.size)
+                        // outputBuffer[chunk]
+
+                        /**
+                         *  --- デコードした生データをエンコーダーに入れる ---
+                         * */
+                        val encoderBufferInfo = MediaCodec.BufferInfo()
+                        while (true) {
+                            val inputBufferId = encodeMediaCodec.dequeueInputBuffer(TIMEOUT_US)
+                            if (inputBufferId >= 0) {
+                                val size = encoderBufferInfo.size
+                                // デコードした生データをエンコーダーへ渡す
+                                val inputBuffer = encodeMediaCodec.getInputBuffer(inputBufferId)!!
+                                // 書き込む。書き込んだデータは[onOutputBufferAvailable]で受け取れる
+                                val writeBuffer = ByteArray(inputBuffer.capacity())
+                                outputBuffer[writeBuffer]
+                                inputBuffer.put(writeBuffer, 0, size)
+                                encodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, presentationTime, 0)
+                                // 時間を足す
+                                presentationTime += abs(presentationTime - encoderBufferInfo.presentationTimeUs)
+                            }
+                            // デコーダーから生データを受け取る
+                            val outputBufferId = encodeMediaCodec.dequeueOutputBuffer(encoderBufferInfo, TIMEOUT_US)
+                            if (outputBufferId >= 0) {
+                                // デコード結果をもらう
+                                val outputBuffer = encodeMediaCodec.getOutputBuffer(outputBufferId)!!
+                                // 書き込む
+                                mediaMuxer.writeSampleData(videoTrackIndex, outputBuffer, encoderBufferInfo)
+                                // 返却
+                                encodeMediaCodec.releaseOutputBuffer(outputBufferId, false)
+                            }
+                        }
+
+
                     }
                 }
-                // デコーダーから生データを受け取る
-                val outputBufferId = encodeMediaCodec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (outputBufferId >= 0) {
-                    // デコード結果をもらう
-                    val outputBuffer = encodeMediaCodec.getOutputBuffer(outputBufferId)!!
-                    // 書き込む
-                    mediaMuxer.writeSampleData(audioTrackIndex, outputBuffer, bufferInfo)
-                    // 返却
-                    encodeMediaCodec.releaseOutputBuffer(outputBufferId, false)
-                }
+
+                // デコーダー終了
+                decodeMediaCodec.stop()
+                decodeMediaCodec.release()
+                showMessage("デコード完了")
+
+                // エンコーダー終了
+                encodeMediaCodec.stop()
+                encodeMediaCodec.release()
+                // MediaMuxerも終了
+                mediaMuxer.stop()
+                mediaMuxer.release()
+                showMessage("エンコード終了")
             }
 
-            // エンコーダー終了
-            encodeMediaCodec.stop()
-            encodeMediaCodec.release()
-
-            // MediaMuxerも終了
-            mediaMuxer.stop()
-            mediaMuxer.release()
-            // 再生するやつも終了
-            audioTrack.release()
-            rawDataInputStream.close()
-            showMessage("エンコード終了")
         }
+
     }
 
+    private fun waitSurface(onCreate: (Surface) -> Unit) {
+        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                onCreate(holder.surface)
+            }
+
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+
+            }
+
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+
+            }
+        })
+    }
 
     /** [AudioTrack]をつくる */
     @SuppressLint("NewApi")
@@ -348,7 +334,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        decodedByteArrayList.clear()
     }
 
 }
