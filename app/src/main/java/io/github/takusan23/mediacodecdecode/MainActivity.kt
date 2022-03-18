@@ -108,7 +108,7 @@ class MainActivity : AppCompatActivity() {
             val width = mediaFormat?.getInteger(MediaFormat.KEY_WIDTH) ?: 1280
             // データを取り出してMediaFormatを作る。なぜかコピーしたのを突っ込んだらコケた
             // TODO エミュレータだとコピーしてパラメータを足してエンコーダーに突っ込むとコケるかも
-            val fixMediaFormat = /*MediaFormat.createVideoFormat(DECODE_MIME_TYPE, width, height)*/mediaFormat?.apply {
+            val fixMediaFormat = MediaFormat.createVideoFormat(DECODE_MIME_TYPE, width, height).apply {
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, INPUT_BUFFER_SIZE)
                 // setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
                 setString(MediaFormat.KEY_MIME, DECODE_MIME_TYPE)
@@ -204,7 +204,6 @@ class MainActivity : AppCompatActivity() {
                         }
                         // エンコーダーへ書き込む前にリリースする
                         decodeMediaCodec.releaseOutputBuffer(outputBufferId, false)
-
                         /**
                          *  --- デコードした生データをエンコーダーに入れる ---
                          * */
@@ -219,11 +218,10 @@ class MainActivity : AppCompatActivity() {
                                 val size = writeByteArray.size
                                 // データが有る限り読み出す
                                 if (readByteSize < chunk.size) {
-                                    inputBuffer.put(chunk, readByteSize, size)
-                                    readByteSize += size
                                     // 書き込む。書き込んだデータは[onOutputBufferAvailable]で受け取れる
-                                    inputBuffer.put(writeByteArray, 0, size)
+                                    inputBuffer.put(chunk, readByteSize, size)
                                     encodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, presentationTime, 0)
+                                    readByteSize += size
                                 } else {
                                     // 終了フラグを立てる
                                     encodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
