@@ -40,7 +40,7 @@ class MainActivity : AppCompatActivity() {
     private val TIMEOUT_US = 10000L
 
     /** ビットレート */
-    private val BIT_RATE = 1000 * 1024
+    private val BIT_RATE = 192_000 // 192kbps
 
     /** MediaCodecでもらえるInputBufferのサイズ */
     private val INPUT_BUFFER_SIZE = 655360
@@ -80,8 +80,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // 別スレッド起動
-        // whileループでActivity止まるので
+        // コルーチンでも良くない
         thread {
 
             // 現在の動画を抽出してるやつ
@@ -106,26 +105,21 @@ class MainActivity : AppCompatActivity() {
             println(mediaFormat)
             val height = mediaFormat?.getInteger(MediaFormat.KEY_HEIGHT) ?: 720
             val width = mediaFormat?.getInteger(MediaFormat.KEY_WIDTH) ?: 1280
-            // データを取り出してMediaFormatを作る。なぜかコピーしたのを突っ込んだらコケた
-            // TODO エミュレータだとコピーしてパラメータを足してエンコーダーに突っ込むとコケるかも
+            // 多分Extractorそのまま突っ込むとコケるので参考にしながら作る
             val fixMediaFormat = MediaFormat.createVideoFormat(DECODE_MIME_TYPE, width, height).apply {
                 // setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                setString(MediaFormat.KEY_MIME, DECODE_MIME_TYPE)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, INPUT_BUFFER_SIZE)
-                setInteger(MediaFormat.KEY_BIT_RATE, /*BIT_RATE*/1920 * 1080)
+                setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
                 setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            }!!
+            }
 
             // MediaMuxer作成
             val mediaMuxer = MediaMuxer(mergedFile.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             // 映像トラック追加
-            val videoTrackIndex = mediaMuxer.addTrack(mediaFormat!!) // TODO 本当はこうやってExtractorからMediaFormatをもらうほうがいい
+            val videoTrackIndex = mediaMuxer.addTrack(mediaFormat!!) // なんか必須データが無いとかでこれはExtractorの方を入れる
             mediaMuxer.start()
-
-            // メタデータ格納用
-            val encoderBufferInfo = MediaCodec.BufferInfo()
 
             // エンコード用（生データ -> H.264）MediaCodec
             val encodeMediaCodec = MediaCodec.createEncoderByType(DECODE_MIME_TYPE).apply {
@@ -135,6 +129,8 @@ class MainActivity : AppCompatActivity() {
             // エンコーダーのSurfaceを取得
             // デコーダーの出力Surfaceの項目にこれを指定して、エンコーダーに映像データが行くようにする
             val inputSurface = encodeMediaCodec.createInputSurface()
+            // Surface取得後Startする
+            encodeMediaCodec.start()
 
             // H.264なはず
             // デコード用（H.264 -> 生データ）MediaCodec
@@ -150,9 +146,27 @@ class MainActivity : AppCompatActivity() {
              """.trimIndent()
             showMessage(message)
 
-            // 読み出し済みの位置と時間
-            var totalBytesRead = 0
-            var presentationTime = 0L
+            // デコードが終わったフラグ
+            var isEOLDecode = false
+
+            /**
+             * --- Surfaceに流れてきたデータをエンコードする ---
+             * */
+            thread {
+                val outputBufferInfo = MediaCodec.BufferInfo()
+                // デコード結果をもらう
+                // デコーダーが生きている間のみ
+                while (!isEOLDecode) {
+                    val outputBufferId = encodeMediaCodec.dequeueOutputBuffer(outputBufferInfo, TIMEOUT_US)
+                    if (outputBufferId >= 0) {
+                        val outputBuffer = encodeMediaCodec.getOutputBuffer(outputBufferId)!!
+                        // 書き込む
+                        mediaMuxer.writeSampleData(videoTrackIndex, outputBuffer, outputBufferInfo)
+                        // 返却
+                        encodeMediaCodec.releaseOutputBuffer(outputBufferId, false)
+                    }
+                }
+            }
 
             /**
              *  --- 複数ファイルを全てデコードする ---
@@ -160,6 +174,8 @@ class MainActivity : AppCompatActivity() {
             thread {
                 var totalPresentationTime = 0L
                 var prevPresentationTime = 0L
+                // メタデータ格納用
+                val encoderBufferInfo = MediaCodec.BufferInfo()
                 while (true) {
                     // デコーダー部分
                     val inputBufferId = decodeMediaCodec.dequeueInputBuffer(TIMEOUT_US)
@@ -169,6 +185,8 @@ class MainActivity : AppCompatActivity() {
                         val size = mediaExtractor!!.readSampleData(inputBuffer, 0)
                         if (size > 0) {
                             // デコーダーへ流す
+                            // 今までの動画の分の再生位置を足しておく
+                            // フレーム番号 * 1000000 / FPS でも出せるらしい
                             decodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, mediaExtractor!!.sampleTime + totalPresentationTime, 0)
                             mediaExtractor!!.advance()
                             // 一個前の動画の動画サイズを控えておく
@@ -176,7 +194,6 @@ class MainActivity : AppCompatActivity() {
                             if (mediaExtractor!!.sampleTime != -1L) {
                                 prevPresentationTime = mediaExtractor!!.sampleTime
                             }
-                            println(totalPresentationTime)
                         } else {
                             totalPresentationTime += prevPresentationTime
                             // データがないので次データへ
@@ -209,87 +226,21 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 // デコーダー終了
+                isEOLDecode = true
                 decodeMediaCodec.stop()
                 decodeMediaCodec.release()
-                showMessage("デコード完了")
 
                 // エンコーダー終了
                 encodeMediaCodec.stop()
                 encodeMediaCodec.release()
+
                 // MediaMuxerも終了
                 mediaMuxer.stop()
                 mediaMuxer.release()
                 showMessage("エンコード終了")
             }
-
-            encodeMediaCodec.setCallback(object : MediaCodec.Callback() {
-                override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
-
-                }
-
-                override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                    // デコード結果をもらう
-                    val outputBuffer = encodeMediaCodec.getOutputBuffer(index)!!
-                    // 書き込む
-                    mediaMuxer.writeSampleData(videoTrackIndex, outputBuffer, info)
-                    // 返却
-                    encodeMediaCodec.releaseOutputBuffer(index, false)
-                }
-
-                override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
-
-                }
-
-                override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
-
-                }
-            })
-            encodeMediaCodec.start()
         }
 
-    }
-
-    private fun waitSurface(onCreate: (Surface) -> Unit) {
-        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {
-                onCreate(holder.surface)
-            }
-
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-
-            }
-
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-
-            }
-        })
-    }
-
-    /** [AudioTrack]をつくる */
-    @SuppressLint("NewApi")
-    private fun createAudioTrack(samplingRate: Int): AudioTrack {
-        // 必須サイズを計算する
-        val bufferSize = AudioTrack.getMinBufferSize(
-            samplingRate,
-            AudioFormat.CHANNEL_OUT_STEREO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
-        // 音声再生するやつ
-        val audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(AudioAttributes.Builder().apply {
-                setUsage(AudioAttributes.USAGE_MEDIA)
-            }.build())
-            .setAudioFormat(AudioFormat.Builder().apply {
-                setSampleRate(samplingRate)
-                setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-            }.build())
-            .setBufferSizeInBytes(bufferSize)
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
-        // 再生開始
-        audioTrack.play()
-        return audioTrack
     }
 
     /**
@@ -312,10 +263,6 @@ class MainActivity : AppCompatActivity() {
     private fun showMessage(message: String) {
         println(message)
         runOnUiThread { Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show() }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
     }
 
 }
