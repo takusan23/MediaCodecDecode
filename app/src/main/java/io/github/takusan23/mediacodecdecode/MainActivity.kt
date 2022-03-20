@@ -19,7 +19,7 @@ import kotlin.concurrent.thread
 class MainActivity : AppCompatActivity() {
 
     /** 動画ファイルがあるフォルダ名 */
-    private val FOLDER_NAME = "split"
+    private val FOLDER_NAME = "bakkure"
 
     /** ファイル名 */
     private val MERGE_FILE_NAME = "merged.aac"
@@ -34,7 +34,13 @@ class MainActivity : AppCompatActivity() {
     private val TIMEOUT_US = 10000L
 
     /** ビットレート */
-    private val BIT_RATE = 128 * 1024
+    private val BIT_RATE = 192_000
+
+    /** サンプリングレート */
+    private val SAMPLING_RATE = 44100
+
+    /** チャンネル数 */
+    private val CHANNEL_COUNT = 2
 
     /** MediaCodecでもらえるInputBufferのサイズを最大にする */
     private val INPUT_BUFFER_SIZE = 655360
@@ -119,29 +125,17 @@ class MainActivity : AppCompatActivity() {
 
             // エンコーダーへ渡すMediaFormat
             println(mediaFormat)
-            val fixMediaFormat = mediaFormat?.apply {
+            val fixMediaFormat = MediaFormat.createAudioFormat(DECODE_MIME_TYPE, SAMPLING_RATE, CHANNEL_COUNT).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, INPUT_BUFFER_SIZE)
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-
-                if (isVideo) {
-                    setInteger(MediaFormat.KEY_CAPTURE_RATE, 1)
-                    setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
-                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10)
-                }
-            }!!
+            }
 
             // MediaMuxer作成
             val mediaMuxer = MediaMuxer(mergedFile.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             // 音声トラック追加
-            val audioTrackIndex = mediaMuxer.addTrack(fixMediaFormat)
+            val audioTrackIndex = mediaMuxer.addTrack(mediaFormat!!)
             mediaMuxer.start()
-
-            // サンプリングレート
-            val samplingRate = mediaFormat?.getInteger(MediaFormat.KEY_SAMPLE_RATE)!!
-            // 生データ再生するやつ
-            val audioTrack = createAudioTrack(samplingRate)
 
             // メタデータ格納用
             val bufferInfo = MediaCodec.BufferInfo()
@@ -153,24 +147,9 @@ class MainActivity : AppCompatActivity() {
                 start()
             }
             // エンコード用（生データ -> aac）MediaCodec
-            val encodeMediaCodec = try {
-                MediaCodec.createEncoderByType(DECODE_MIME_TYPE).apply {
-                    configure(fixMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                    start()
-                }
-            } catch (e: Exception) {
-                // エミュレーターのときは上で例外がスローｗｗｗするのでこっちを使う
-                MediaCodec.createEncoderByType(DECODE_MIME_TYPE).apply {
-                    val format = MediaFormat().apply {
-                        setString(MediaFormat.KEY_MIME, DECODE_MIME_TYPE)
-                        setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
-                        setInteger(MediaFormat.KEY_CHANNEL_COUNT, 2)
-                        setInteger(MediaFormat.KEY_SAMPLE_RATE, 44100)
-                        setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                    }
-                    configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                    start()
-                }
+            val encodeMediaCodec = MediaCodec.createEncoderByType(DECODE_MIME_TYPE).apply {
+                configure(fixMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                start()
             }
 
             // エンコーダー、デコーダーの種類を出す
@@ -262,9 +241,10 @@ class MainActivity : AppCompatActivity() {
                         encodeMediaCodec.queueInputBuffer(inputBufferId, 0, size, mPresentationTime, 0)
                         // ここはAOSPパクった。経過時間を計算してる
                         totalBytesRead += size
+                        println("読み出しバイト数 $totalBytesRead")
                         // これ totalBytesRead / 4 であっってんの？
                         // 何故か時間が2倍してある,,,は？
-                        mPresentationTime = 1000000L * (totalBytesRead / 4) / 44100
+                        mPresentationTime = 1000000L * (totalBytesRead / (CHANNEL_COUNT * 2)) / SAMPLING_RATE
                     } else {
                         encodeMediaCodec.queueInputBuffer(inputBufferId, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                         break
@@ -287,41 +267,16 @@ class MainActivity : AppCompatActivity() {
             encodeMediaCodec.release()
 
             // MediaMuxerも終了
+            // MediaMuxer#stopで終了する場合、大体MediaFormatのパラメータ不足です。
+            // MediaExtractorで出てきたFormatを入れると直ると思います。
             mediaMuxer.stop()
             mediaMuxer.release()
-            // 再生するやつも終了
-            audioTrack.release()
             rawDataInputStream.close()
+
+            // 一時ファイルの削除
+            rawAudioFile.delete()
             showMessage("エンコード終了")
         }
-    }
-
-
-    /** [AudioTrack]をつくる */
-    @SuppressLint("NewApi")
-    private fun createAudioTrack(samplingRate: Int): AudioTrack {
-        // 必須サイズを計算する
-        val bufferSize = AudioTrack.getMinBufferSize(
-            samplingRate,
-            AudioFormat.CHANNEL_OUT_STEREO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
-        // 音声再生するやつ
-        val audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(AudioAttributes.Builder().apply {
-                setUsage(AudioAttributes.USAGE_MEDIA)
-            }.build())
-            .setAudioFormat(AudioFormat.Builder().apply {
-                setSampleRate(samplingRate)
-                setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-            }.build())
-            .setBufferSizeInBytes(bufferSize)
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
-        // 再生開始
-        audioTrack.play()
-        return audioTrack
     }
 
     /**
