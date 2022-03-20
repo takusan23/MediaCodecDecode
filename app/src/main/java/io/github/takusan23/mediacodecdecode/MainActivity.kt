@@ -3,14 +3,10 @@ package io.github.takusan23.mediacodecdecode
 import android.annotation.SuppressLint
 import android.media.*
 import android.os.Bundle
-import android.view.Surface
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import java.io.File
 import kotlin.concurrent.thread
-import kotlin.math.abs
 
 
 /**
@@ -21,8 +17,6 @@ import kotlin.math.abs
  * 音声トラックだけです
  * */
 class MainActivity : AppCompatActivity() {
-
-    private val surfaceView by lazy { findViewById<SurfaceView>(R.id.surface_view) }
 
     /** 動画ファイルがあるフォルダ名 */
     private val FOLDER_NAME = "split"
@@ -35,6 +29,12 @@ class MainActivity : AppCompatActivity() {
 
     /** デコードするMIME_TYPE */
     private val DECODE_MIME_TYPE = "video/avc" // MediaFormat.MIMETYPE_VIDEO_AVC
+
+    /** エンコードするMIME_TYPE */
+    private val ENCODE_MIME_TYPE = DECODE_MIME_TYPE
+
+    /** 書き出し先コンテナフォーマット */
+    private val OUTPUT_CONATINER_FORMAT = MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
 
     /** タイムアウト */
     private val TIMEOUT_US = 10000L
@@ -106,8 +106,16 @@ class MainActivity : AppCompatActivity() {
             val height = mediaFormat?.getInteger(MediaFormat.KEY_HEIGHT) ?: 720
             val width = mediaFormat?.getInteger(MediaFormat.KEY_WIDTH) ?: 1280
             // 多分Extractorそのまま突っ込むとコケるので参考にしながら作る
-            val fixMediaFormat = MediaFormat.createVideoFormat(DECODE_MIME_TYPE, width, height).apply {
+            val decoderMediaFormat = MediaFormat.createVideoFormat(DECODE_MIME_TYPE, width, height).apply {
                 // setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, INPUT_BUFFER_SIZE)
+                setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
+                setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            }
+            // エンコーダー用MediaFormat
+            val encoderMediaFormat = MediaFormat.createVideoFormat(ENCODE_MIME_TYPE, width, height).apply {
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, INPUT_BUFFER_SIZE)
                 setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
                 setInteger(MediaFormat.KEY_FRAME_RATE, 30)
@@ -116,14 +124,14 @@ class MainActivity : AppCompatActivity() {
             }
 
             // MediaMuxer作成
-            val mediaMuxer = MediaMuxer(mergedFile.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val mediaMuxer = MediaMuxer(mergedFile.path, OUTPUT_CONATINER_FORMAT)
             // 映像トラック追加
-            val videoTrackIndex = mediaMuxer.addTrack(mediaFormat!!) // なんか必須データが無いとかでこれはExtractorの方を入れる
+            val videoTrackIndex = mediaMuxer.addTrack(mediaFormat!!) // H.264の場合、なんか必須データが無いとかでこれはExtractorの方を入れる
             mediaMuxer.start()
 
             // エンコード用（生データ -> H.264）MediaCodec
-            val encodeMediaCodec = MediaCodec.createEncoderByType(DECODE_MIME_TYPE).apply {
-                configure(fixMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val encodeMediaCodec = MediaCodec.createEncoderByType(ENCODE_MIME_TYPE).apply {
+                configure(encoderMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             }
 
             // エンコーダーのSurfaceを取得
@@ -135,7 +143,7 @@ class MainActivity : AppCompatActivity() {
             // H.264なはず
             // デコード用（H.264 -> 生データ）MediaCodec
             val decodeMediaCodec = MediaCodec.createDecoderByType(DECODE_MIME_TYPE).apply {
-                configure(fixMediaFormat, inputSurface, null, 0)
+                configure(decoderMediaFormat, inputSurface, null, 0)
                 start()
             }
 
