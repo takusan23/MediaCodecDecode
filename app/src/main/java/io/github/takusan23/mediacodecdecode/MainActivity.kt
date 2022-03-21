@@ -15,11 +15,10 @@ import java.io.File
  *
  * に入れた動画を再生します。
  *
- * 映像トラックだけです。
+ * 音声トラックだけです
  * */
 class MainActivity : AppCompatActivity() {
 
-    private val surfaceView by lazy { findViewById<SurfaceView>(R.id.surface_view) }
     private val FOLDER_NAME = "split"
 
     @SuppressLint("NewApi")
