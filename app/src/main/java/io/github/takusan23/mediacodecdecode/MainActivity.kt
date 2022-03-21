@@ -183,7 +183,7 @@ class MainActivity : AppCompatActivity() {
                 var totalPresentationTime = 0L
                 var prevPresentationTime = 0L
                 // メタデータ格納用
-                val encoderBufferInfo = MediaCodec.BufferInfo()
+                val decoderBufferInfo = MediaCodec.BufferInfo()
                 while (true) {
                     // デコーダー部分
                     val inputBufferId = decodeMediaCodec.dequeueInputBuffer(TIMEOUT_US)
@@ -225,7 +225,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                     // デコードした内容をエンコーダーへ移す
-                    val outputBufferId = decodeMediaCodec.dequeueOutputBuffer(encoderBufferInfo, TIMEOUT_US)
+                    val outputBufferId = decodeMediaCodec.dequeueOutputBuffer(decoderBufferInfo, TIMEOUT_US)
                     // ネストがやばくなってきた,,,
                     if (outputBufferId >= 0) {
                         // デコード結果をもらう
