@@ -238,7 +238,6 @@ class MainActivity : AppCompatActivity() {
                         mPresentationTime = 1000000L * (totalBytesRead / (CHANNEL_COUNT * 2)) / SAMPLING_RATE
                     } else {
                         encodeMediaCodec.queueInputBuffer(inputBufferId, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        break
                     }
                 }
                 // デコーダーから生データを受け取る
@@ -246,10 +245,15 @@ class MainActivity : AppCompatActivity() {
                 if (outputBufferId >= 0) {
                     // デコード結果をもらう
                     val outputBuffer = encodeMediaCodec.getOutputBuffer(outputBufferId)!!
-                    // 書き込む
-                    mediaMuxer.writeSampleData(audioTrackIndex, outputBuffer, bufferInfo)
-                    // 返却
-                    encodeMediaCodec.releaseOutputBuffer(outputBufferId, false)
+                    if (bufferInfo.size > 0) {
+                        // 書き込む
+                        mediaMuxer.writeSampleData(audioTrackIndex, outputBuffer, bufferInfo)
+                        // 返却
+                        encodeMediaCodec.releaseOutputBuffer(outputBufferId, false)
+                    } else {
+                        // もう無い！
+                        break
+                    }
                 }
             }
 
