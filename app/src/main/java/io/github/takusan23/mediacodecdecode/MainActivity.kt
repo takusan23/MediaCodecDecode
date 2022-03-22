@@ -45,16 +45,6 @@ class MainActivity : AppCompatActivity() {
     /** MediaCodecでもらえるInputBufferのサイズを最大にする */
     private val INPUT_BUFFER_SIZE = 655360
 
-    /**
-     * デコードした生データと表示タイムスタンプ
-     *
-     * 生データ、つまりPCM。AudioTrackで再生できるはず
-     * */
-    private val decodedByteArrayList = arrayListOf<Pair<ByteArray, Long>>()
-
-    /** 動画ならtrue */
-    private val isVideo = false
-
     @SuppressLint("NewApi")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -125,6 +115,7 @@ class MainActivity : AppCompatActivity() {
 
             // エンコーダーへ渡すMediaFormat
             println(mediaFormat)
+
             val fixMediaFormat = MediaFormat.createAudioFormat(DECODE_MIME_TYPE, SAMPLING_RATE, CHANNEL_COUNT).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, INPUT_BUFFER_SIZE)
@@ -299,11 +290,6 @@ class MainActivity : AppCompatActivity() {
     private fun showMessage(message: String) {
         println(message)
         runOnUiThread { Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show() }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        decodedByteArrayList.clear()
     }
 
 }
